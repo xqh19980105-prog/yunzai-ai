@@ -1,0 +1,159 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import api from '@/lib/api/axios';
+import { Card } from '@/components/ui/card';
+import { UserHeader } from '@/components/layout/UserHeader';
+import { getSystemConfig } from '@/lib/api/system-config';
+import { AlertCircle } from 'lucide-react';
+
+interface AIDomain {
+  id: string;
+  title: string;
+  description: string | null;
+  icon: string | null;
+  isVisible: boolean;
+  isMaintenance: boolean;
+}
+
+export function HomePage() {
+  const router = useRouter();
+  const [domains, setDomains] = useState<AIDomain[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [announcement, setAnnouncement] = useState<string>('');
+  const [siteTitle, setSiteTitle] = useState<string>('');
+  const [siteDescription, setSiteDescription] = useState<string>('');
+
+  useEffect(() => {
+    // Fetch AI domains
+    api
+      .get<AIDomain[]>('/api/ai-domains')
+      .then((response) => {
+        // Backend already filters isVisible and isMaintenance, but we can filter again if needed
+        if (response && response.data && Array.isArray(response.data)) {
+          setDomains(response.data);
+        } else {
+          setDomains([]);
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to fetch domains:', error);
+        setDomains([]); // Set empty array on error
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+
+    // Fetch system config for announcement and site info
+    getSystemConfig()
+      .then((config) => {
+        if (config && typeof config === 'object') {
+          if (config.announcement && typeof config.announcement === 'string') {
+            setAnnouncement(config.announcement);
+          }
+          if (config.site_info && typeof config.site_info === 'object') {
+            if (config.site_info.title && typeof config.site_info.title === 'string') {
+              setSiteTitle(config.site_info.title);
+            }
+            if (config.site_info.description && typeof config.site_info.description === 'string') {
+              setSiteDescription(config.site_info.description);
+            }
+          }
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to fetch system config:', error);
+        // Keep default empty values on error
+      });
+  }, []);
+
+  const handleCardClick = (domainId: string) => {
+    router.push(`/chat/${domainId}`);
+  };
+
+  if (loading) {
+    return (
+      <>
+        <UserHeader />
+        <div className="container mx-auto px-4 py-8">
+          <div className="grid grid-cols-2 md:grid-cols-10 gap-4">
+            {[...Array(10)].map((_, i) => (
+              <Card key={i} className="h-32 animate-pulse bg-gray-100" />
+            ))}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <UserHeader />
+      <div className="container mx-auto px-4 py-8">
+        {/* Site Title and Description */}
+        {(siteTitle || siteDescription) && (
+          <div className="mb-8 text-center">
+            {siteTitle && (
+              <h1 className="text-4xl md:text-5xl font-bold mb-3 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+                {siteTitle}
+              </h1>
+            )}
+            {siteDescription && (
+              <p className="text-gray-600 text-lg max-w-2xl mx-auto">
+                {siteDescription}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Announcement Banner */}
+        {announcement && (
+          <div className="mb-6 bg-blue-50 border border-blue-200 rounded-xl p-4 shadow-soft">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <h3 className="text-sm font-semibold text-blue-900 mb-1">平台公告</h3>
+                <p className="text-sm text-blue-800 whitespace-pre-wrap">{announcement}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <h2 className="text-3xl font-bold mb-8 text-center">AI 工具</h2>
+        
+        {/* Responsive Grid: Desktop 10 columns, Mobile 2 columns */}
+        {domains.length === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-gray-500 text-lg mb-4">暂无可用工具</p>
+            <p className="text-gray-400 text-sm">
+              请联系管理员添加AI工具，或稍后再试
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-10 gap-4">
+            {domains.map((domain) => (
+              <Card
+                key={domain.id}
+                className="p-4 rounded-xl shadow-soft hover:shadow-md transition-shadow cursor-pointer bg-white border border-gray-100"
+                onClick={() => handleCardClick(domain.id)}
+              >
+                <div className="flex flex-col items-center text-center space-y-2">
+                  {domain.icon && (
+                    <div className="text-4xl mb-2">{domain.icon}</div>
+                  )}
+                  <h3 className="font-semibold text-sm">{domain.title}</h3>
+                  {domain.description && (
+                    <p className="text-xs text-gray-500 line-clamp-2">
+                      {domain.description}
+                    </p>
+                  )}
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}

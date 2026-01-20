@@ -1,0 +1,232 @@
+// This is your Prisma schema file for Yunzai AI (SaaS Platform)
+// V7.0 Specification
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../backend/node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// User Management
+// ============================================
+
+enum UserStatus {
+  ACTIVE
+  BANNED
+  LOCKED_ASSET_PROTECTION
+}
+
+model User {
+  id                        String    @id @default(uuid())
+  email                     String    @unique
+  passwordHash              String    @map("password_hash")
+  membershipExpireAt        DateTime? @map("membership_expire_at")
+  apiKey                    String?   @map("api_key") // Encrypted
+  apiBaseUrl                String?   @map("api_base_url") // Custom API base URL (optional, for relay/proxy)
+  isLegalSigned             Boolean   @default(false) @map("is_legal_signed") // For Legal Gatekeeper
+  deviceFingerprintCount    Int       @default(0) @map("device_fingerprint_count") // For risk control
+  status                    UserStatus @default(ACTIVE)
+  registeredIp              String?   @map("registered_ip") // IP address at registration
+  lastLoginIp               String?   @map("last_login_ip") // Last login IP address
+  
+  // Relations
+  legalLogs                 LegalLog[]
+  chatHistories             ChatHistory[]
+  devices                   Device[]
+  statusLogs                UserStatusLog[]
+  
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+  
+  @@map("users")
+  @@index([email])
+  @@index([status])
+}
+
+// ============================================
+// System Configuration (Key-Value Store)
+// ============================================
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique // Keys: site_info, scripts, announcement, contact_qr, sensitive_words, watermark_config, sidebar_menu
+  value     String   @db.Text // JSON string for complex values
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") // Admin user ID who updated this config
+  
+  @@map("system_configs")
+  @@index([key])
+}
+
+// ============================================
+// BYOK Disaster Recovery
+// ============================================
+
+model RelayConfig {
+  id             String   @id @default(uuid())
+  name           String   // e.g., "Yunwu"
+  baseUrl        String   @map("base_url")
+  apiKeyLink     String?  @map("api_key_link") // Link to get API key from the relay provider
+  buyLink        String?  @map("buy_link") // Link to purchase/recharge credits
+  isActive       Boolean  @default(true) @map("is_active")
+  availableModels Json?   @map("available_models") // Array of model names supported by this relay, e.g., ["gpt-4", "gpt-3.5-turbo"]
+  
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  
+  @@map("relay_configs")
+  @@index([isActive])
+}
+
+// ============================================
+// AI Domain (Function Blocks)
+// ============================================
+
+model AIDomain {
+  id             String   @id @default(uuid())
+  title          String
+  description    String?  @db.Text
+  icon           String?  // Icon identifier (emoji or icon name)
+  greetingMessage String? @db.Text @map("greeting_message") // Welcome message when user opens this AI tool
+  workflowConfig Json?    @map("workflow_config") // Stores the Step 1->Step 2 logic
+  targetModel    String?  @map("target_model") // Forced model binding (deprecated, use step-level model binding instead)
+  isVisible      Boolean  @default(true) @map("is_visible")
+  isMaintenance  Boolean  @default(false) @map("is_maintenance")
+  sortOrder      Int      @default(0) @map("sort_order")
+  
+  // Relations
+  chatHistories  ChatHistory[]
+  
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  
+  @@map("ai_domains")
+  @@index([isVisible, isMaintenance])
+  @@index([sortOrder])
+}
+
+// ============================================
+// Activation Code System
+// ============================================
+
+enum ActivationCodeStatus {
+  UNUSED
+  USED
+  FROZEN
+}
+
+model ActivationCode {
+  code      String                @id // The activation code itself
+  days      Int                   // Number of days this code grants
+  batchTag  String?               @map("batch_tag") // For batch management
+  status    ActivationCodeStatus  @default(UNUSED)
+  usedBy    String?               @map("used_by") // User ID who used this code
+  usedAt    DateTime?             @map("used_at")
+  
+  createdAt DateTime              @default(now()) @map("created_at")
+  updatedAt DateTime              @updatedAt @map("updated_at")
+  
+  @@map("activation_codes")
+  @@index([status])
+  @@index([batchTag])
+  @@index([usedBy])
+}
+
+// ============================================
+// Legal Compliance (Forensic Evidence)
+// ============================================
+
+model LegalLog {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  signatureText String   @map("signature_text") @db.Text // Must match "我承诺合法使用"
+  ip            String   // IP address
+  userAgent     String?  @map("user_agent") @db.Text
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  // Relations
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("legal_logs")
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ============================================
+// Chat History
+// ============================================
+
+model ChatHistory {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  domainId    String?  @map("domain_id") // Reference to AIDomain if applicable
+  role        String   // "user" | "assistant" | "system"
+  content     String   @db.Text
+  metadata    Json?    // Additional metadata (model used, tokens, etc.)
+  
+  createdAt   DateTime @default(now()) @map("created_at")
+  
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  domain      AIDomain? @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  
+  @@map("chat_histories")
+  @@index([userId])
+  @@index([domainId])
+  @@index([createdAt])
+}
+
+// ============================================
+// Device Management
+// ============================================
+
+model Device {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  fingerprint     String   // Device fingerprint (hashed)
+  ip              String   // IP address
+  userAgent       String?  @map("user_agent") @db.Text
+  lastUsedAt      DateTime @default(now()) @map("last_used_at")
+  isActive        Boolean  @default(true) @map("is_active") // Current active device
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("devices")
+  @@index([userId])
+  @@index([fingerprint])
+  @@index([isActive])
+  @@index([lastUsedAt])
+}
+
+// ============================================
+// User Status Change Log (Audit Trail)
+// ============================================
+
+model UserStatusLog {
+  id              String     @id @default(uuid())
+  userId          String     @map("user_id")
+  previousStatus  UserStatus @map("previous_status")
+  newStatus       UserStatus @map("new_status")
+  reason          String     @db.Text // Reason for status change (required)
+  operatorEmail   String     @map("operator_email") // Admin who made the change
+  ip              String?    // IP address of the operator
+  
+  createdAt       DateTime   @default(now()) @map("created_at")
+  
+  // Relations
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("user_status_logs")
+  @@index([userId])
+  @@index([createdAt])
+}

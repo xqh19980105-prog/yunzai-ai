@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "compilerOptions": {
+    "deleteOutDir": true,
+    "watchAssets": true,
+    "assetsInclude": ["**/*.json", "**/*.md"]
+  },
+  "watchOptions": {
+    "usePolling": false,
+    "interval": 1000,
+    "binaryInterval": 3000,
+    "ignored": ["node_modules/**", "dist/**", "*.spec.ts"]
+  }
+}

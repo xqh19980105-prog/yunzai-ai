@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>认证调试工具</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        .section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f9f9f9;
+            border-left: 4px solid #4CAF50;
+            border-radius: 5px;
+        }
+        .section h2 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button.danger {
+            background: #f44336;
+        }
+        button.danger:hover {
+            background: #da190b;
+        }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-size: 13px;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status.ok {
+            background: #4CAF50;
+            color: white;
+        }
+        .status.error {
+            background: #f44336;
+            color: white;
+        }
+        .status.warning {
+            background: #ff9800;
+            color: white;
+        }
+        #results {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 认证状态调试工具</h1>
+        
+        <div class="section">
+            <h2>1. 检查 LocalStorage</h2>
+            <button onclick="checkLocalStorage()">检查存储状态</button>
+            <button onclick="viewToken()">查看 Token</button>
+            <button onclick="decodeToken()">解码 Token</button>
+        </div>
+
+        <div class="section">
+            <h2>2. 测试 API 连接</h2>
+            <button onclick="testAuthMe()">测试 /api/auth/me</button>
+            <button onclick="testRelayConfigs()">测试 /api/admin/relay-configs</button>
+            <button onclick="testWithoutToken()">测试无 Token 请求</button>
+        </div>
+
+        <div class="section">
+            <h2>3. 清理操作</h2>
+            <button class="danger" onclick="clearAuth()">清除认证数据</button>
+            <button class="danger" onclick="forceLogout()">强制退出并跳转登录</button>
+        </div>
+
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000';
+        const resultsDiv = document.getElementById('results');
+
+        function log(title, content, status = 'info') {
+            const section = document.createElement('div');
+            section.className = 'section';
+            section.innerHTML = `
+                <h2>${title} <span class="status ${status}">${status.toUpperCase()}</span></h2>
+                <pre>${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}</pre>
+            `;
+            resultsDiv.insertBefore(section, resultsDiv.firstChild);
+        }
+
+        function checkLocalStorage() {
+            const accessToken = localStorage.getItem('accessToken');
+            const authStorage = localStorage.getItem('auth-storage');
+            
+            let result = {
+                accessToken: accessToken ? '✅ 存在' : '❌ 不存在',
+                accessTokenLength: accessToken ? accessToken.length : 0,
+                authStorage: authStorage ? '✅ 存在' : '❌ 不存在',
+            };
+
+            if (authStorage) {
+                try {
+                    const parsed = JSON.parse(authStorage);
+                    result.authStorageContent = parsed;
+                } catch (e) {
+                    result.authStorageParseError = e.message;
+                }
+            }
+
+            log('LocalStorage 检查', result, accessToken && authStorage ? 'ok' : 'error');
+        }
+
+        function viewToken() {
+            const token = localStorage.getItem('accessToken');
+            if (!token) {
+                log('Token 查看', '❌ Token 不存在', 'error');
+                return;
+            }
+
+            log('Token 内容', {
+                token: token,
+                length: token.length,
+                parts: token.split('.').length,
+            }, 'ok');
+        }
+
+        function decodeToken() {
+            const token = localStorage.getItem('accessToken');
+            if (!token) {
+                log('Token 解码', '❌ Token 不存在', 'error');
+                return;
+            }
+
+            try {
+                const parts = token.split('.');
+                if (parts.length !== 3) {
+                    throw new Error('Token 格式不正确，应该有3部分');
+                }
+
+                const payload = JSON.parse(atob(parts[1]));
+                
+                const now = Math.floor(Date.now() / 1000);
+                const isExpired = payload.exp && payload.exp < now;
+                
+                log('Token 解码结果', {
+                    payload: payload,
+                    isExpired: isExpired,
+                    expiresAt: payload.exp ? new Date(payload.exp * 1000).toLocaleString() : '未设置',
+                    issuedAt: payload.iat ? new Date(payload.iat * 1000).toLocaleString() : '未设置',
+                }, isExpired ? 'error' : 'ok');
+            } catch (e) {
+                log('Token 解码失败', e.message, 'error');
+            }
+        }
+
+        async function testAuthMe() {
+            const token = localStorage.getItem('accessToken');
+            if (!token) {
+                log('测试 /api/auth/me', '❌ Token 不存在', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/auth/me`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    log('测试 /api/auth/me', {
+                        status: response.status,
+                        user: data,
+                    }, 'ok');
+                } else {
+                    log('测试 /api/auth/me', {
+                        status: response.status,
+                        error: data,
+                    }, 'error');
+                }
+            } catch (e) {
+                log('测试 /api/auth/me 失败', e.message, 'error');
+            }
+        }
+
+        async function testRelayConfigs() {
+            const token = localStorage.getItem('accessToken');
+            if (!token) {
+                log('测试 relay-configs', '❌ Token 不存在', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/admin/relay-configs`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    log('测试 /api/admin/relay-configs', {
+                        status: response.status,
+                        configCount: Array.isArray(data) ? data.length : '不是数组',
+                        configs: data,
+                    }, 'ok');
+                } else {
+                    log('测试 /api/admin/relay-configs', {
+                        status: response.status,
+                        error: data,
+                        message: '❌ 请求失败 - 这可能是导致自动退出的原因！',
+                    }, 'error');
+                }
+            } catch (e) {
+                log('测试 relay-configs 失败', {
+                    error: e.message,
+                    message: '❌ 网络错误或服务器未响应',
+                }, 'error');
+            }
+        }
+
+        async function testWithoutToken() {
+            try {
+                const response = await fetch(`${API_BASE}/api/admin/relay-configs`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const data = await response.json();
+                
+                log('无 Token 测试', {
+                    status: response.status,
+                    response: data,
+                    message: response.status === 401 ? '✅ 正确返回 401' : '⚠️ 应该返回 401',
+                }, response.status === 401 ? 'ok' : 'warning');
+            } catch (e) {
+                log('无 Token 测试失败', e.message, 'error');
+            }
+        }
+
+        function clearAuth() {
+            if (!confirm('确定要清除所有认证数据吗？')) {
+                return;
+            }
+
+            localStorage.removeItem('accessToken');
+            localStorage.removeItem('auth-storage');
+            
+            log('清除认证数据', '✅ 已清除 accessToken 和 auth-storage', 'ok');
+        }
+
+        function forceLogout() {
+            if (!confirm('确定要强制退出并跳转到登录页吗？')) {
+                return;
+            }
+
+            localStorage.clear();
+            window.location.href = '/admin/login';
+        }
+
+        // 自动执行初始检查
+        window.onload = function() {
+            checkLocalStorage();
+        };
+    </script>
+</body>
+</html>

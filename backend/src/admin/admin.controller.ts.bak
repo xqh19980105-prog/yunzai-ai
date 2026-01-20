@@ -1,0 +1,1111 @@
+import {
+  Controller,
+  Get,
+  Put,
+  Post,
+  Delete,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+  Request,
+  HttpException,
+  HttpStatus,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
+import { IsString, IsNotEmpty, IsInt, Min, Max, IsOptional, IsBoolean, IsUrl, IsUUID } from 'class-validator';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
+import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
+
+// 使用字符串字面量类型作为枚举
+type ActivationCodeStatus = 'UNUSED' | 'USED' | 'FROZEN';
+type UserStatus = 'ACTIVE' | 'BANNED' | 'LOCKED_ASSET_PROTECTION';
+import { UserId } from '../common/decorators/user-id.decorator';
+import { UuidParam } from '../common/decorators/uuid-param.decorator';
+import { UserService } from '../common/services/user.service';
+import { ErrorCodes } from '../common/constants/error-codes';
+
+/**
+ * Admin Controller
+ * Centralized admin API endpoints
+ */
+@Controller('api/admin')
+@UseGuards(JwtAuthGuard, AdminGuard)
+export class AdminController {
+  private readonly logger = new Logger(AdminController.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private userService: UserService,
+  ) {}
+
+  /**
+   * GET /api/admin/ai-domains
+   * Get all AI domains for workflow editor
+   */
+  @Get('ai-domains')
+  async getAIDomains() {
+    try {
+      const domains = await this.prisma.aIDomain.findMany({
+        orderBy: { sortOrder: 'asc' },
+      });
+
+      return domains || [];
+    } catch (error) {
+      this.logger.error(`Failed to get AI domains: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_AI_DOMAINS_FAILED',
+          message: '获取AI领域列表失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * POST /api/admin/ai-domains
+   * Create a new AI domain
+   */
+  @Post('ai-domains')
+  async createAIDomain(
+    @Body()
+    body: {
+      title: string;
+      description?: string;
+      icon?: string;
+      greetingMessage?: string;
+      workflowConfig?: any;
+      targetModel?: string;
+      isVisible?: boolean;
+      isMaintenance?: boolean;
+      sortOrder?: number;
+    },
+  ) {
+    const domain = await this.prisma.aIDomain.create({
+      data: {
+        title: body.title,
+        description: body.description || null,
+        icon: body.icon || null,
+        greetingMessage: body.greetingMessage || null,
+        workflowConfig: body.workflowConfig || null,
+        targetModel: body.targetModel || null,
+        isVisible: body.isVisible !== undefined ? body.isVisible : true,
+        isMaintenance: body.isMaintenance !== undefined ? body.isMaintenance : false,
+        sortOrder: body.sortOrder || 0,
+      },
+    });
+
+    return domain;
+  }
+
+  /**
+   * PUT /api/admin/ai-domains/:id
+   * Update AI domain configuration
+   */
+  @Put('ai-domains/:id')
+  async updateAIDomain(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      title?: string;
+      description?: string;
+      icon?: string;
+      greetingMessage?: string;
+      workflowConfig?: any;
+      targetModel?: string;
+      isVisible?: boolean;
+      isMaintenance?: boolean;
+      sortOrder?: number;
+    },
+  ) {
+    const updateData: any = {};
+
+    if (body.title !== undefined) updateData.title = body.title;
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.icon !== undefined) updateData.icon = body.icon;
+    if (body.greetingMessage !== undefined) updateData.greetingMessage = body.greetingMessage;
+    if (body.workflowConfig !== undefined) updateData.workflowConfig = body.workflowConfig;
+    if (body.targetModel !== undefined) updateData.targetModel = body.targetModel;
+    if (body.isVisible !== undefined) updateData.isVisible = body.isVisible;
+    if (body.isMaintenance !== undefined) updateData.isMaintenance = body.isMaintenance;
+    if (body.sortOrder !== undefined) updateData.sortOrder = body.sortOrder;
+
+    const domain = await this.prisma.aIDomain.update({
+      where: { id },
+      data: updateData,
+    });
+
+    return domain;
+  }
+
+  /**
+   * DELETE /api/admin/ai-domains/:id
+   * Delete an AI domain
+   */
+  @Delete('ai-domains/:id')
+  async deleteAIDomain(@Param('id') id: string) {
+    await this.prisma.aIDomain.delete({
+      where: { id },
+    });
+
+    return { success: true };
+  }
+
+  /**
+   * GET /api/admin/activation-codes
+   * Get activation codes list with filters
+   */
+  @Get('activation-codes')
+  async getActivationCodes(
+    @Query('status') status?: string,
+    @Query('batchTag') batchTag?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const pageNum = parseInt(page || '1', 10);
+      const limitNum = parseInt(limit || '50', 10);
+      const skip = (pageNum - 1) * limitNum;
+
+      const where: { status?: ActivationCodeStatus; batchTag?: string } = {};
+      if (status && ['UNUSED', 'USED', 'FROZEN'].includes(status)) {
+        where.status = status as ActivationCodeStatus;
+      }
+      if (batchTag) {
+        where.batchTag = batchTag;
+      }
+
+      const [codes, total] = await Promise.all([
+        this.prisma.activationCode.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limitNum,
+          // Note: Prisma doesn't support relations for ActivationCode, so we'll return user info separately
+        }),
+        this.prisma.activationCode.count({ where }),
+      ]);
+
+      // Get user info for used codes
+      const usedCodes = (codes || []).filter((c: { usedBy: string | null }) => c.usedBy);
+      const userIds = [...new Set(usedCodes.map((c: { usedBy: string | null }) => c.usedBy).filter(Boolean))];
+      const users = userIds.length
+        ? await this.prisma.user.findMany({
+            where: { id: { in: userIds as string[] } },
+            select: { id: true, email: true },
+          })
+        : [];
+
+      const userMap = new Map(users.map((u: { id: string; email: string }) => [u.id, u.email]));
+
+      return {
+        codes: (codes || []).map((code: { usedBy: string | null; [key: string]: any }) => ({
+          ...code,
+          usedByEmail: code.usedBy ? userMap.get(code.usedBy) : null,
+        })),
+        total: total || 0,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil((total || 0) / limitNum) || 1,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get activation codes: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_ACTIVATION_CODES_FAILED',
+          message: '获取激活码列表失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * POST /api/admin/activation-codes/generate
+   * Generate batch activation codes
+   */
+  @Post('activation-codes/generate')
+  async generateActivationCodes(
+    @Body()
+    body: {
+      count: number;
+      days: number;
+      batchTag?: string;
+    },
+  ) {
+    const { count, days, batchTag } = body;
+
+    if (count < 1 || count > 1000) {
+      throw new Error('激活码数量必须在 1-1000 之间');
+    }
+
+    if (days < 1) {
+      throw new Error('天数必须大于 0');
+    }
+
+    // Generate activation codes
+    const codes: string[] = [];
+    const activationCodes = [];
+    const existingCodes = new Set<string>();
+
+    // Get existing codes to avoid duplicates
+    const existing = await this.prisma.activationCode.findMany({
+      select: { code: true },
+    });
+    existing.forEach((c: { code: string }) => existingCodes.add(c.code.toUpperCase()));
+
+    let attempts = 0;
+    const maxAttempts = count * 10; // Allow some retries for uniqueness
+
+    while (codes.length < count && attempts < maxAttempts) {
+      attempts++;
+      
+      // Generate a random activation code (26 characters, alphanumeric)
+      // Convert to uppercase to ensure consistency with validation
+      const code = (
+        Math.random().toString(36).substring(2, 15) +
+        Math.random().toString(36).substring(2, 15)
+      ).toUpperCase();
+
+      // Check for duplicates in current batch and existing codes
+      if (!codes.includes(code) && !existingCodes.has(code)) {
+        codes.push(code);
+        existingCodes.add(code);
+        
+        activationCodes.push({
+          code,
+          days,
+          batchTag: batchTag || null,
+          status: 'UNUSED' as ActivationCodeStatus,
+        });
+      }
+    }
+
+    if (codes.length < count) {
+      throw new Error(`无法生成 ${count} 个唯一的激活码，已生成 ${codes.length} 个`);
+    }
+
+    // Batch insert activation codes with error handling
+    try {
+      await this.prisma.$transaction(
+        activationCodes.map((code: { code: string; days: number; batchTag: string | null; status: string }) =>
+          this.prisma.activationCode.create({
+            data: code,
+          }),
+        ),
+      );
+    } catch (error: any) {
+      // Handle unique constraint violation
+      if (error.code === 'P2002') {
+        throw new Error('激活码生成失败：检测到重复的激活码，请重试');
+      }
+      throw error;
+    }
+
+    return { codes, count: codes.length };
+  }
+
+  /**
+   * PUT /api/admin/activation-codes/:code/status
+   * Update activation code status (freeze/unfreeze)
+   */
+  @Put('activation-codes/:code/status')
+  async updateActivationCodeStatus(
+    @Param('code') code: string,
+    @Body() body: { status: 'UNUSED' | 'USED' | 'FROZEN' },
+  ) {
+    const updated = await this.prisma.activationCode.update({
+      where: { code },
+      data: { status: body.status },
+    });
+
+    return updated;
+  }
+
+  /**
+   * GET /api/admin/system-config
+   * Get system config (admin endpoint, returns object format)
+   */
+  @Get('system-config')
+  async getSystemConfig() {
+    try {
+      const configs = await this.prisma.systemConfig.findMany();
+      
+      // Return as key-value object (for admin editor)
+      const configObj: Record<string, any> = {};
+      for (const config of (configs || [])) {
+        try {
+          // Try to parse JSON, fallback to string
+          configObj[config.key] = JSON.parse(config.value);
+        } catch {
+          configObj[config.key] = config.value;
+        }
+      }
+      
+      return configObj;
+    } catch (error) {
+      this.logger.error(`Failed to get system config: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_SYSTEM_CONFIG_FAILED',
+          message: '获取系统配置失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * PUT /api/admin/system-config
+   * Update system config
+   */
+  @Put('system-config')
+  async updateSystemConfig(
+    @UserId() userId: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    if (!body || typeof body !== 'object' || Object.keys(body).length === 0) {
+      throw new HttpException(
+        {
+          code: 'EMPTY_CONFIG',
+          message: '配置不能为空',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    // Update each config key-value pair
+    const updates = Object.entries(body)
+      .filter(([key]) => key && typeof key === 'string' && key.trim().length > 0)
+      .map(([key, value]) => {
+        const stringValue = typeof value === 'string' 
+          ? value 
+          : (value === null || value === undefined 
+              ? '' 
+              : JSON.stringify(value));
+        return this.prisma.systemConfig.upsert({
+          where: { key: key.trim() },
+          update: {
+            value: stringValue,
+            updatedBy: userId,
+          },
+          create: {
+            key: key.trim(),
+            value: stringValue,
+            updatedBy: userId,
+          },
+        });
+      });
+
+    if (updates.length === 0) {
+      throw new HttpException(
+        {
+          code: 'NO_VALID_CONFIG',
+          message: '没有有效的配置项',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    await Promise.all(updates);
+
+    return { success: true };
+  }
+
+  /**
+   * GET /api/admin/stats
+   * Get dashboard statistics
+   */
+  @Get('stats')
+  async getStats() {
+    try {
+      const now = new Date();
+      const todayStart = new Date(now.setHours(0, 0, 0, 0));
+      const todayEnd = new Date(now.setHours(23, 59, 59, 999));
+
+      // Daily registrations (users created today)
+      const dailyRegisters = await this.prisma.user.count({
+        where: {
+          createdAt: {
+            gte: todayStart,
+            lte: todayEnd,
+          },
+        },
+      });
+
+      // Active members (users with valid membership)
+      const activeMembers = await this.prisma.user.count({
+        where: {
+          membershipExpireAt: {
+            gt: new Date(),
+          },
+          status: 'ACTIVE',
+        },
+      });
+
+      // API usage (today's chat history count as proxy)
+      const apiUsage = await this.prisma.chatHistory.count({
+        where: {
+          createdAt: {
+            gte: todayStart,
+            lte: todayEnd,
+          },
+          role: 'user', // Count user messages as API calls
+        },
+      });
+
+      return {
+        dailyRegisters: dailyRegisters || 0,
+        activeMembers: activeMembers || 0,
+        apiUsage: apiUsage || 0,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get stats: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_STATS_FAILED',
+          message: '获取统计数据失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/admin/users
+   * Get users list with filters
+   */
+  @Get('users')
+  async getUsers(
+    @Query('status') status?: string,
+    @Query('membershipStatus') membershipStatus?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const pageNum = parseInt(page || '1', 10);
+      const limitNum = parseInt(limit || '50', 10);
+
+      const where: { status?: UserStatus; email?: { contains: string; mode: 'insensitive' } } = {};
+      if (status && ['ACTIVE', 'BANNED', 'LOCKED_ASSET_PROTECTION'].includes(status)) {
+        where.status = status as UserStatus;
+      }
+      if (search) {
+        where.email = { contains: search, mode: 'insensitive' };
+      }
+
+      // Get all users first (for sorting by admin status and filtering by membership)
+      // Note: In production, consider moving sorting and filtering to database level
+      const allUsers = await this.prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          email: true,
+          status: true,
+          membershipExpireAt: true,
+          isLegalSigned: true,
+          deviceFingerprintCount: true,
+          createdAt: true,
+          updatedAt: true,
+          registeredIp: true,
+          lastLoginIp: true,
+          // Exclude sensitive fields
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // Add isAdmin field and filter by membership status
+      let usersWithAdminFlag = allUsers.map((user: { email: string | null; [key: string]: any }) => ({
+        ...user,
+        isAdmin: user.email?.toLowerCase().includes('admin') || false,
+      }));
+
+      // Filter by membership status
+      if (membershipStatus && ['member', 'non-member', 'expired'].includes(membershipStatus)) {
+        const now = new Date();
+        usersWithAdminFlag = usersWithAdminFlag.filter((user: { membershipExpireAt: Date | null; isAdmin: boolean; [key: string]: any }) => {
+          const hasValidMembership = user.membershipExpireAt && new Date(user.membershipExpireAt) > now;
+          const hasExpiredMembership = user.membershipExpireAt && new Date(user.membershipExpireAt) <= now;
+          
+          if (membershipStatus === 'member') {
+            return hasValidMembership;
+          } else if (membershipStatus === 'non-member') {
+            return !user.membershipExpireAt;
+          } else if (membershipStatus === 'expired') {
+            return hasExpiredMembership;
+          }
+          return true;
+        });
+      }
+
+      // Sort: admins first, then by createdAt desc
+      usersWithAdminFlag.sort((a: { isAdmin: boolean; createdAt: Date }, b: { isAdmin: boolean; createdAt: Date }) => {
+        if (a.isAdmin && !b.isAdmin) return -1;
+        if (!a.isAdmin && b.isAdmin) return 1;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+
+      // Apply pagination after sorting
+      const total = usersWithAdminFlag.length;
+      const skip = (pageNum - 1) * limitNum;
+      const users = usersWithAdminFlag.slice(skip, skip + limitNum);
+
+      return {
+        users: users || [],
+        total: total || 0,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum) || 1,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get users: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_USERS_FAILED',
+          message: '获取用户列表失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/admin/users/:id
+   * Get user details
+   */
+  @Get('users/:id')
+  async getUser(@UuidParam('id') id: string) {
+    try {
+      // ✅ 参数验证已由@UuidParam()装饰器完成
+      
+      this.logger.log(`Getting user details for ID: ${id}`);
+
+      // Step 1: Get basic user info first (without relations that might not exist)
+      // ✅ 使用UserService统一查询，自动处理用户不存在的情况
+      let userBase;
+      try {
+        userBase = await this.userService.findByIdSelect(id, {
+          id: true,
+          email: true,
+          status: true,
+          membershipExpireAt: true,
+          isLegalSigned: true,
+          deviceFingerprintCount: true,
+          createdAt: true,
+          updatedAt: true,
+        });
+      } catch (error: unknown) {
+        // UserService已经处理了用户不存在的情况，这里只需要处理数据库错误
+        if (error instanceof BadRequestException) {
+          // 用户不存在，转换为404
+          throw new HttpException(
+            {
+              code: ErrorCodes.USER_NOT_FOUND,
+              message: '用户不存在',
+            },
+            HttpStatus.NOT_FOUND,
+          );
+        }
+        // 其他错误（数据库错误等）
+        const errorMessage = error instanceof Error ? error.message : '未知错误';
+        this.logger.error(`Database error getting user: ${errorMessage}`);
+        throw new HttpException(
+          {
+            code: ErrorCodes.DATABASE_ERROR,
+            message: `数据库查询失败: ${errorMessage}`,
+          },
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
+      }
+
+      // Step 2: Try to get IP fields separately (may not exist if migration not run)
+      let registeredIp: string | null = null;
+      let lastLoginIp: string | null = null;
+      try {
+        // ✅ 使用UserService统一查询
+        const userWithIp = await this.userService.findByIdSelect(id, {
+          registeredIp: true,
+          lastLoginIp: true,
+        });
+        registeredIp = userWithIp.registeredIp || null;
+        lastLoginIp = userWithIp.lastLoginIp || null;
+      } catch (ipError: any) {
+        // IP fields may not exist yet, that's okay - just skip them
+        this.logger.warn(`IP fields may not exist: ${ipError.message}`);
+      }
+
+      // Step 3: Get legal logs
+      let legalLogs: any[] = [];
+      try {
+        legalLogs = await this.prisma.legalLog.findMany({
+          where: { userId: id },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        });
+      } catch (legalError: any) {
+        this.logger.warn(`Error getting legal logs: ${legalError.message}`);
+        legalLogs = [];
+      }
+
+      // Step 4: Get chat histories
+      let chatHistories: any[] = [];
+      try {
+        chatHistories = await this.prisma.chatHistory.findMany({
+          where: { userId: id },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          select: {
+            id: true,
+            role: true,
+            content: true,
+            createdAt: true,
+            domain: {
+              select: {
+                id: true,
+                title: true,
+              },
+            },
+          },
+        });
+      } catch (chatError: any) {
+        this.logger.warn(`Error getting chat histories: ${chatError.message}`);
+        chatHistories = [];
+      }
+
+      // Step 5: Try to get devices (may fail if table doesn't exist yet)
+      let devices: any[] = [];
+      try {
+        devices = await this.prisma.device.findMany({
+          where: { userId: id },
+          orderBy: { lastUsedAt: 'desc' },
+          select: {
+            id: true,
+            fingerprint: true,
+            ip: true,
+            userAgent: true,
+            isActive: true,
+            lastUsedAt: true,
+            createdAt: true,
+          },
+        });
+      } catch (deviceError: any) {
+        // If devices table doesn't exist, just return empty array
+        this.logger.warn(`Devices query failed (table may not exist): ${deviceError.message}`);
+        this.logger.warn(`Device error code: ${deviceError.code}`);
+        devices = [];
+      }
+
+      // Step 6: Get activation codes used by this user
+      let activationCodes: any[] = [];
+      try {
+        activationCodes = await this.prisma.activationCode.findMany({
+          where: {
+            usedBy: id,
+          },
+          orderBy: { usedAt: 'desc' },
+          select: {
+            code: true,
+            days: true,
+            batchTag: true,
+            usedAt: true,
+            createdAt: true,
+          },
+        });
+      } catch (activationError: any) {
+        this.logger.warn(`Error getting activation codes: ${activationError.message}`);
+        activationCodes = [];
+      }
+
+      // Step 6.5: Get status change logs
+      let statusLogs: any[] = [];
+      try {
+        statusLogs = await this.prisma.userStatusLog.findMany({
+          where: { userId: id },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            previousStatus: true,
+            newStatus: true,
+            reason: true,
+            operatorEmail: true,
+            ip: true,
+            createdAt: true,
+          },
+        });
+      } catch (statusLogError: any) {
+        this.logger.warn(`Error getting status logs: ${statusLogError.message}`);
+        statusLogs = [];
+      }
+
+      // Step 7: Calculate membership activation time
+      const sortedByUsedAt = [...activationCodes].sort((a, b) => {
+        if (!a.usedAt) return 1;
+        if (!b.usedAt) return -1;
+        return new Date(a.usedAt).getTime() - new Date(b.usedAt).getTime();
+      });
+      const membershipActivatedAt = sortedByUsedAt.length > 0 && sortedByUsedAt[0].usedAt
+        ? sortedByUsedAt[0].usedAt
+        : null;
+
+      this.logger.log(`Successfully retrieved user details for: ${userBase.email}`);
+
+      return {
+        ...userBase,
+        registeredIp: registeredIp || null,
+        lastLoginIp: lastLoginIp || null,
+        legalLogs: legalLogs || [],
+        chatHistories: chatHistories || [],
+        devices: devices || [],
+        activationCodes: activationCodes || [],
+        statusLogs: statusLogs || [],
+        membershipActivatedAt: membershipActivatedAt || null,
+      };
+    } catch (error: any) {
+      // If it's already an HttpException, re-throw it
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      // Log the full error for debugging
+      this.logger.error(
+        `Error getting user details for ID ${id}: ${error.message}`,
+        error.stack,
+      );
+      this.logger.error(`Error name: ${error.name}, Error code: ${error.code}`);
+
+      // Return a proper HttpException with more details
+      throw new HttpException(
+        {
+          code: ErrorCodes.INTERNAL_ERROR,
+          message: `获取用户详情失败: ${error.message}`,
+          details: error.code || error.name || 'UNKNOWN',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * PUT /api/admin/users/:id/status
+   * Update user status (requires reason for audit trail)
+   */
+  @Put('users/:id/status')
+  async updateUserStatus(
+    @Param('id') id: string,
+    @Body() body: { status: 'ACTIVE' | 'BANNED' | 'LOCKED_ASSET_PROTECTION'; reason: string },
+    @Request() req: any,
+  ) {
+    if (!body.reason || body.reason.trim().length === 0) {
+      throw new HttpException(
+        {
+          code: 'REASON_REQUIRED',
+          message: '必须填写状态变更原因',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    // Get current user status
+    // ✅ 使用UserService统一查询
+    const currentUser = await this.userService.findByIdSelect(id, {
+      status: true,
+      email: true,
+    });
+
+    // Get operator info
+    const operatorEmail = req.user.email || 'unknown';
+    const operatorIp = req.ip || req.connection?.remoteAddress || null;
+
+    // Update user status and create log in a transaction
+    const [user] = await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id },
+        data: { status: body.status },
+        select: {
+          id: true,
+          email: true,
+          status: true,
+        },
+      }),
+      this.prisma.userStatusLog.create({
+        data: {
+          userId: id,
+          previousStatus: currentUser.status,
+          newStatus: body.status,
+          reason: body.reason.trim(),
+          operatorEmail,
+          ip: operatorIp,
+        },
+      }),
+    ]);
+
+    this.logger.log(
+      `User status updated: ${currentUser.email} (${id}) from ${currentUser.status} to ${body.status} by ${operatorEmail}. Reason: ${body.reason}`,
+    );
+
+    return user;
+  }
+
+  /**
+   * PUT /api/admin/users/:id/membership
+   * DISABLED: Membership can only be activated via activation codes
+   * This endpoint has been removed to ensure proper audit trail
+   */
+  @Put('users/:id/membership')
+  async updateUserMembership(
+    @Param('id') id: string,
+    @Body() body: { expireAt: string | null },
+  ) {
+    throw new HttpException(
+      {
+        code: 'MEMBERSHIP_UPDATE_DISABLED',
+        message: '会员只能通过激活码激活，不支持直接设置会员时间',
+      },
+      HttpStatus.FORBIDDEN,
+    );
+  }
+
+  /**
+   * GET /api/admin/relay-configs
+   * Get all relay configurations
+   */
+  @Get('relay-configs')
+  async getRelayConfigs() {
+    try {
+      const configs = await this.prisma.relayConfig.findMany({
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return configs || [];
+    } catch (error) {
+      this.logger.error(`Failed to get relay configs: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_RELAY_CONFIGS_FAILED',
+          message: '获取中转站配置失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/admin/relay-configs/active/models
+   * Get available models from the currently active relay
+   * Used by workflow editor to show only supported models
+   */
+  @Get('relay-configs/active/models')
+  async getActiveRelayModels() {
+    try {
+      const activeRelay = await this.prisma.relayConfig.findFirst({
+        where: { isActive: true },
+      });
+
+      if (!activeRelay) {
+        return { models: [], message: '没有激活的中转站' };
+      }
+
+      const models = (activeRelay.availableModels || []) as string[];
+      return {
+        models: models || [],
+        relayName: activeRelay.name || '',
+        relayId: activeRelay.id || '',
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get active relay models: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      throw new HttpException(
+        {
+          code: 'GET_ACTIVE_RELAY_MODELS_FAILED',
+          message: '获取激活中转站模型列表失败，请稍后重试',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * POST /api/admin/relay-configs
+   * Create a new relay configuration
+   * If setting as active, deactivate all other relays
+   */
+  @Post('relay-configs')
+  async createRelayConfig(
+    @Body()
+    body: {
+      name: string;
+      baseUrl: string;
+      apiKeyLink?: string; // Link to get API key
+      buyLink?: string; // Link to purchase/recharge credits
+      isActive?: boolean;
+      availableModels?: string[]; // Array of model names supported by this relay
+    },
+  ) {
+    const willBeActive = body.isActive !== undefined ? body.isActive : true;
+    const models = body.availableModels || [];
+
+    // If activating, must have at least one model configured
+    if (willBeActive && models.length === 0) {
+      throw new Error('激活的中转站必须配置至少一个支持的模型');
+    }
+
+    // If activating this relay, deactivate all other relays (only one can be active)
+    if (willBeActive) {
+      await this.prisma.relayConfig.updateMany({
+        where: { isActive: true },
+        data: { isActive: false },
+      });
+    }
+
+    const config = await this.prisma.relayConfig.create({
+      data: {
+        name: body.name,
+        baseUrl: body.baseUrl,
+        apiKeyLink: body.apiKeyLink || null,
+        buyLink: body.buyLink || null,
+        isActive: willBeActive,
+        availableModels: body.availableModels || [],
+      },
+    });
+
+    // If activating, check for incompatible models
+    if (willBeActive) {
+      const newModels = (body.availableModels || []) as string[];
+      
+      if (newModels.length > 0) {
+        const domains = await this.prisma.aIDomain.findMany({
+          where: { targetModel: { not: null } },
+          select: { id: true, title: true, targetModel: true },
+        });
+
+        const incompatibleDomains = domains.filter(
+          (domain: { targetModel: string | null }) => domain.targetModel && !newModels.includes(domain.targetModel),
+        );
+
+        if (incompatibleDomains.length > 0) {
+          return {
+            ...config,
+            warning: `中转站已创建并激活，但有 ${incompatibleDomains.length} 个AI工具的模型不在新中转站的支持列表中，请前往工作流编辑器更新模型配置。`,
+            incompatibleDomains: incompatibleDomains.map((d: { id: string; title: string; targetModel: string | null }) => ({
+              id: d.id,
+              title: d.title,
+              currentModel: d.targetModel,
+            })),
+            availableModels: newModels,
+          };
+        }
+      }
+    }
+
+    return config;
+  }
+
+  /**
+   * PUT /api/admin/relay-configs/:id
+   * Update relay configuration
+   * When switching active relay, validates and warns about incompatible models
+   */
+  @Put('relay-configs/:id')
+  async updateRelayConfig(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      name?: string;
+      baseUrl?: string;
+      apiKeyLink?: string; // Link to get API key
+      buyLink?: string; // Link to purchase/recharge credits
+      isActive?: boolean;
+      availableModels?: string[];
+    },
+  ) {
+    const updateData: any = {};
+
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.baseUrl !== undefined) updateData.baseUrl = body.baseUrl;
+    if (body.apiKeyLink !== undefined) updateData.apiKeyLink = body.apiKeyLink;
+    if (body.buyLink !== undefined) updateData.buyLink = body.buyLink;
+    if (body.availableModels !== undefined) updateData.availableModels = body.availableModels;
+    
+    // Get current config to check if we're switching active relay
+    const currentConfig = await this.prisma.relayConfig.findUnique({ where: { id } });
+    if (!currentConfig) {
+      throw new Error('中转站配置不存在');
+    }
+
+    const wasActive = currentConfig.isActive;
+    const willBeActive = body.isActive !== undefined ? body.isActive : wasActive;
+
+    // If activating this relay, deactivate all other relays (only one can be active)
+    if (body.isActive === true && !wasActive) {
+      // Check if models are configured
+      const models = (body.availableModels !== undefined 
+        ? body.availableModels 
+        : (currentConfig.availableModels || [])) as string[];
+      
+      if (models.length === 0) {
+        throw new Error('激活的中转站必须配置至少一个支持的模型');
+      }
+
+      await this.prisma.relayConfig.updateMany({
+        where: { isActive: true, id: { not: id } },
+        data: { isActive: false },
+      });
+    }
+
+    if (body.isActive !== undefined) updateData.isActive = body.isActive;
+
+    const config = await this.prisma.relayConfig.update({
+      where: { id },
+      data: updateData,
+    });
+
+    // If switching to a new active relay, check for incompatible models
+    if (body.isActive === true && !wasActive && willBeActive) {
+      const newModels = (body.availableModels || config.availableModels || []) as string[];
+      
+      // Get all AI domains with their target models
+      const domains = await this.prisma.aIDomain.findMany({
+        where: { targetModel: { not: null } },
+        select: { id: true, title: true, targetModel: true },
+      });
+
+      // Find domains with models not supported by the new relay
+      const incompatibleDomains = domains.filter(
+        (domain: { targetModel: string | null }) => domain.targetModel && !newModels.includes(domain.targetModel),
+      );
+
+      if (incompatibleDomains.length > 0) {
+        return {
+          ...config,
+          warning: `切换中转站成功，但有 ${incompatibleDomains.length} 个AI工具的模型不在新中转站的支持列表中，请前往工作流编辑器更新模型配置。`,
+          incompatibleDomains: incompatibleDomains.map((d: { id: string; title: string; targetModel: string | null }) => ({
+            id: d.id,
+            title: d.title,
+            currentModel: d.targetModel,
+          })),
+          availableModels: newModels,
+        };
+      }
+    }
+
+    return config;
+  }
+
+  /**
+   * DELETE /api/admin/relay-configs/:id
+   * Delete relay configuration
+   */
+  @Delete('relay-configs/:id')
+  async deleteRelayConfig(@Param('id') id: string) {
+    await this.prisma.relayConfig.delete({
+      where: { id },
+    });
+
+    return { success: true };
+  }
+
+}
